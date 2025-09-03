@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+        <title>Re: Intel P6 vs P7 system call performance [LWN.net]</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta property="og:title" content="Re: Intel P6 vs P7 system call performance">
+        <meta property="og:site_name" content="LWN.net">
+        <meta property="og:type" content="article">
+        <meta property="og:description"
+                content=" From:     	      Linus Torvalds &lt;torvalds@transmeta.com&gt; To:     	      'H. Peter Anvin' [...]">
+        <meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">
+        <META NAME="robots" CONTENT="noai, noimageai">
+        <link rel="icon" href="https://static.lwn.net/images/favicon.png" type="image/png">
+        <link rel="alternate" type="application/rss+xml" title="LWN.net headlines" href="https://lwn.net/headlines/rss">
+        <link rel="alternate" type="application/rss+xml" title="Comments posted to this article"
+                href="https://lwn.net/headlines/18419/">
+        <link rel="stylesheet" href="/CSS/lwn">
+        <link rel="stylesheet" href="/CSS/nosub">
+
+
+</head>
+
+<body>
+        <div class="maincolumn flexcol">
+                <div class="middlecolumn">
+                        <div class="PageHeadline">
+                                <h1>Re: Intel P6 vs P7 system call performance</h1>
+                                <div class="Byline">[Posted December 18, 2002 by corbet]
+                                        <p>
+                                </div>
+                        </div>
+                        <div class="ArticleText">
+                                <table>
+                                        <tr>
+                                                <td valign="top"><b>From</b>:</td>
+                                                <td>&nbsp;</td>
+                                                <td valign="top">Linus Torvalds &lt;torvalds@transmeta.com&gt;</td>
+                                        </tr>
+                                        <tr>
+                                                <td valign="top"><b>To</b>:</td>
+                                                <td>&nbsp;</td>
+                                                <td valign="top">"H. Peter Anvin" &lt;hpa@transmeta.com&gt;</td>
+                                        </tr>
+                                        <tr>
+                                                <td valign="top"><b>Subject</b>:</td>
+                                                <td>&nbsp;</td>
+                                                <td valign="top">Re: Intel P6 vs P7 system call performance</td>
+                                        </tr>
+                                        <tr>
+                                                <td valign="top"><b>Date</b>:</td>
+                                                <td>&nbsp;</td>
+                                                <td valign="top">Tue, 17 Dec 2002 22:38:09 -0800 (PST)</td>
+                                        </tr>
+                                        <tr>
+                                                <td valign="top"><b>Cc</b>:</td>
+                                                <td>&nbsp;</td>
+                                                <td valign="top">Ulrich Drepper &lt;drepper@redhat.com&gt;,
+                                                        Matti Aarnio &lt;matti.aarnio@zmailer.org&gt;, Hugh Dickins
+                                                        &lt;hugh@veritas.com&gt;,
+                                                        Dave Jones &lt;davej@codemonkey.org.uk&gt;,
+                                                        Ingo Molnar &lt;mingo@elte.hu&gt;,
+                                                        &lt;linux-kernel@vger.kernel.org&gt;</td>
+                                        </tr>
+                                </table>
+                                <p>
+                                <pre>
+
+On Tue, 17 Dec 2002, Linus Torvalds wrote:
+<font class="QuotedText">&gt;
+</font><font class="QuotedText">&gt; Which is ok for a regular fast system call (ebp will get restored
+</font><font class="QuotedText">&gt; immediately), but it is NOT ok for the system call restart case, since in
+</font><font class="QuotedText">&gt; that case we want %ebp to contain the old stack pointer, not the sixth
+</font><font class="QuotedText">&gt; argument.
+</font>
+I came up with an absolutely wonderfully _disgusting_ solution for this.
+
+The thing to realize on how to solve this is that since "sysenter" loses
+track of EIP, there's really no real reason to try to return directly
+after the "sysenter" instruction anyway. The return point is really
+totally arbitrary, after all.
+
+Now, couple this with the fact that system call restarting will always
+just subtract two from the "return point" aka saved EIP value (that's the
+size of an "int 0x80" instruction), and what you can do is to make the
+kernel point the sysexit return point not at just past the "sysenter", but
+instead make it point to just past a totally unrelated 2-byte jump
+instruction.
+
+With that in mind, I made the sysentry trampoline look like this:
+
+        static const char sysent[] = {
+                0x51,                   /* push %ecx */
+                0x52,                   /* push %edx */
+                0x55,                   /* push %ebp */
+                0x89, 0xe5,             /* movl %esp,%ebp */
+                0x0f, 0x34,             /* sysenter */
+        /* System call restart point is here! (SYSENTER_RETURN - 2) */
+                0xeb, 0xfa,             /* jmp to "movl %esp,%ebp" */
+        /* System call normal return point is here! (SYSENTER_RETURN in entry.S) */
+                0x5d,                   /* pop %ebp */
+                0x5a,                   /* pop %edx */
+                0x59,                   /* pop %ecx */
+                0xc3                    /* ret */
+        };
+
+which does the right thing for a "restarted" system call (ie when it
+restarts, it won't re-do just the sysenter instruction, it will really
+restart at the backwards jump, and thus re-start the "movl %esp,%ebp"
+too).
+
+Which means that now the kernel can happily trash %ebp as part of the
+sixth argument setup, since system call restarting will re-initialize it
+to point to the user-level stack that we need in %ebp because otherwise it
+gets totally lost.
+
+I'm a disgusting pig, and proud of it to boot.
+
+			Linus
+
+-
+To unsubscribe from this list: send the line "unsubscribe linux-kernel" in
+the body of a message to majordomo@vger.kernel.org
+More majordomo info at  <a href="http://vger.kernel.org/majordomo-info.html">http://vger.kernel.org/majordomo-info.html</a>
+Please read the FAQ at  <a href="http://www.tux.org/lkml/">http://www.tux.org/lkml/</a>
+
+</pre>
+                                </p>
+                                <p><a name="Comments"></a>
+                        </div> <!-- middlecolumn -->
+                        <div class="rightcol not-print">
+                                <ins data-revive-zoneid="12085" data-revive-id="fa8c6c9da7f33852f7097c4a94da1070"></ins>
+                        </div>
+                </div> <!-- maincolumn -->
+        </div>
+</body>
+
+</html>
